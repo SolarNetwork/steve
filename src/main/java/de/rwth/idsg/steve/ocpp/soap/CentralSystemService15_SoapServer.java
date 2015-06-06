@@ -45,7 +45,10 @@ public class CentralSystemService15_SoapServer implements CentralSystemService {
         // Get the Address value from WS-A Header
         MessageContext messageContext = webServiceContext.getMessageContext();
         AddressingProperties addressProp = (AddressingProperties) messageContext.get(JAXWSAConstants.ADDRESSING_PROPERTIES_INBOUND);
-        String endpointAddress = addressProp.getFrom().getAddress().getValue();
+        String endpointAddress = (addressProp != null 
+        	&& addressProp.getFrom() != null 
+        	&& addressProp.getFrom().getAddress() != null 
+        	? addressProp.getFrom().getAddress().getValue() : "anonymous");
 
         return service.bootNotification(parameters, chargeBoxIdentity, OcppProtocol.V_15_SOAP, endpointAddress);
     }
