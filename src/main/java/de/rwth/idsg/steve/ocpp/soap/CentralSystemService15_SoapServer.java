@@ -48,7 +48,7 @@ public class CentralSystemService15_SoapServer implements CentralSystemService {
         String endpointAddress = (addressProp != null 
         	&& addressProp.getFrom() != null 
         	&& addressProp.getFrom().getAddress() != null 
-        	? addressProp.getFrom().getAddress().getValue() : "anonymous");
+        	? addressProp.getFrom().getAddress().getValue() : null);
 
         return service.bootNotification(parameters, chargeBoxIdentity, OcppProtocol.V_15_SOAP, endpointAddress);
     }
