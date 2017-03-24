@@ -33,6 +33,7 @@ import java.util.Date;
 import java.util.Iterator;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.regex.Pattern;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import javax.xml.namespace.QName;
@@ -63,7 +64,8 @@ import org.slf4j.LoggerFactory;
  * </p>
  * 
  * <pre>
- * &lt;Authentication xmlns="urn://SolarNetwork/SolarNode/WS" ts="2015-01-01T12:00:00.000Z"&gt;doEIdjlsdkfjsopdifjso==&lt;/Authentication&gt;
+ * &lt;Authentication xmlns="urn://SolarNetwork/SolarNode/WS" 
+ *    ts="2015-01-01T12:00:00.000Z"&gt;doEIdjlsdkfjsopdifjso==&lt;/Authentication&gt;
  * </pre>
  * 
  * <p>
@@ -75,20 +77,84 @@ import org.slf4j.LoggerFactory;
  * <ol>
  * <li>The OCPP {@code chargePointIdentity} SOAP header value, or an empty
  * string if not available.</li>
- * <li>The current date, in ISO 8601 format in the UTC time zone.
- * <li>
- * <li>Top-level SOAP header elements, in DOM order.
- * <li>
+ * <li>The current date, in ISO 8601 format in the UTC time zone.</li>
+ * <li>Top-level SOAP header elements, in DOM order. In addition, for any
+ * top-level element in the {@code http://www.w3.org/2005/08/addressing}
+ * namespace (WS-Addressing) then the first of any child {@code Address} element
+ * is included. This is to ensure all WS-Addressing values are included in the
+ * digest.</li>
  * <li>Recursive SOAP body elements, in DOM order, including the SOAP body
  * element itself.</li>
  * </ol>
+ * 
+ * <p>
+ * For any SOAP element to be included in the digest, the syntax of the value to
+ * add is <code>{fqn}localName=value</code> where <code>fqn</code> is the fully
+ * qualified namespace of the element, <code>localName</code> is the element
+ * name, and <code>value</code> is the normalized text value of the element
+ * (normalized by calling {@link org.w3c.dom.Node.normalize()}). If the text
+ * value is only whitespace, however, the entire value (and <code>=</code>
+ * character are omitted.
+ * </p>
+ * 
+ * <p>
+ * For example, a SOAP message like this:
+ * </p>
+ * 
+ * <pre>
+ * &lt;S:Envelope xmlns:S="http://www.w3.org/2003/05/soap-envelope"&gt;
+	&lt;S:Header&gt;
+		&lt;chargeBoxIdentity xmlns="urn://Ocpp/Cs/2012/06/"&gt;UID=1013,O=SolarDev&lt;/chargeBoxIdentity&gt;
+		&lt;To xmlns="http://www.w3.org/2005/08/addressing"
+			&gt;http://localhost:9000/steve/services/CentralSystemService&lt;/To&gt;
+		&lt;Action xmlns="http://www.w3.org/2005/08/addressing"&gt;/BootNotification&lt;/Action&gt;
+		&lt;ReplyTo xmlns="http://www.w3.org/2005/08/addressing"&gt;
+			&lt;Address&gt;http://www.w3.org/2005/08/addressing/anonymous&lt;/Address&gt;
+		&lt;/ReplyTo&gt;
+		&lt;MessageID xmlns="http://www.w3.org/2005/08/addressing"
+			&gt;uuid:f86a3b23-5db3-4260-ab21-d72348da5ecc&lt;/MessageID&gt;
+		&lt;From xmlns="http://www.w3.org/2005/08/addressing"&gt;
+			&lt;Address&gt;http://192.168.1.44:8680/ocpp/v15&lt;/Address&gt;
+		&lt;/From&gt;
+	&lt;/S:Header&gt;
+	&lt;S:Body&gt;
+		&lt;bootNotificationRequest xmlns="urn://Ocpp/Cs/2012/06/"&gt;
+			&lt;chargePointVendor&gt;SolarNetwork&lt;/chargePointVendor&gt;
+			&lt;chargePointModel&gt;SolarNode&lt;/chargePointModel&gt;
+			&lt;chargePointSerialNumber&gt;155&lt;/chargePointSerialNumber&gt;
+			&lt;firmwareVersion&gt;0.1.0&lt;/firmwareVersion&gt;
+		&lt;/bootNotificationRequest&gt;
+	&lt;/S:Body&gt;
+&lt;/S:Envelope&gt;
+ * </pre>
+ * 
+ * <p>
+ * would result in a canonical digest value like this:
+ * </p>
+ * 
+ * <pre>
+ * UID=1013,O=SolarDev
+2015-06-16T06:31:13.492Z
+{urn://Ocpp/Cs/2012/06/}chargeBoxIdentity=UID=1013,O=SolarDev
+{http://www.w3.org/2005/08/addressing}To=http://localhost:9000/steve/services/CentralSystemService
+{http://www.w3.org/2005/08/addressing}Action=/BootNotification
+{http://www.w3.org/2005/08/addressing}ReplyTo=http://www.w3.org/2005/08/addressing/anonymous
+{http://www.w3.org/2005/08/addressing}MessageID=uuid:f86a3b23-5db3-4260-ab21-d72348da5ecc
+{http://www.w3.org/2005/08/addressing}From=http://192.168.1.44:8680/ocpp/v15
+{http://www.w3.org/2003/05/soap-envelope}Body
+{urn://Ocpp/Cs/2012/06/}bootNotificationRequest
+{urn://Ocpp/Cs/2012/06/}chargePointVendor=SolarNetwork
+{urn://Ocpp/Cs/2012/06/}chargePointModel=SolarNode
+{urn://Ocpp/Cs/2012/06/}chargePointSerialNumber=155
+{urn://Ocpp/Cs/2012/06/}firmwareVersion=0.1.0
+ * </pre>
  * 
  * <p>
  * The {@link #getMaximumTimeSkew()} value represents the maximum amount of time
  * difference allowed between the system's reported current time and the
  * 
  * @author matt
- * @version 1.0
+ * @version 1.2
  */
 public class HMACHandler implements SOAPHandler<SOAPMessageContext> {
 
@@ -102,7 +168,10 @@ public class HMACHandler implements SOAPHandler<SOAPMessageContext> {
 
 	public static final String DEFAULT_SECRET = "changeit";
 
+	private static final Pattern NON_WHITESPACE = Pattern.compile("\\S");
+
 	private String secret = DEFAULT_SECRET;
+	private boolean required = true;
 	private Mac hmac;
 	private long maximumTimeSkew = 5 * 60 * 1000L; // 5 minutes
 
@@ -218,9 +287,8 @@ public class HMACHandler implements SOAPHandler<SOAPMessageContext> {
 				header.normalize();
 				hashValue = header.getTextContent();
 			}
-			if ( cbIdent == null
-					&& (OCPP_CS_CHARGE_BOX_IDENTITY.equals(headerName) || OCPP_CP_CHARGE_BOX_IDENTITY
-							.equals(headerName)) ) {
+			if ( cbIdent == null && (OCPP_CS_CHARGE_BOX_IDENTITY.equals(headerName)
+					|| OCPP_CP_CHARGE_BOX_IDENTITY.equals(headerName)) ) {
 				cbIdent = hashValue;
 			}
 			buf.append(hashKey).append('=').append(hashValue).append('\n');
@@ -286,10 +354,14 @@ public class HMACHandler implements SOAPHandler<SOAPMessageContext> {
 
 	private void appendHashData(SOAPElement root, StringBuilder buf) {
 		QName name = root.getElementQName();
+		boolean first = true;
 		for ( Iterator<?> itr = root.getChildElements(); itr.hasNext(); ) {
 			Object o = itr.next();
 			if ( o instanceof SOAPElement ) {
-				buf.append(name.toString()).append('\n');
+				if ( first ) {
+					buf.append(name.toString()).append('\n');
+					first = false;
+				}
 				appendHashData((SOAPElement) o, buf);
 			} else if ( o instanceof Text ) {
 				Text t = (Text) o;
@@ -297,7 +369,11 @@ public class HMACHandler implements SOAPHandler<SOAPMessageContext> {
 					continue;
 				}
 				t.normalize();
-				buf.append(name.toString()).append('=').append(t.getTextContent()).append('\n');
+
+				// only append non-whitespace text
+				if ( NON_WHITESPACE.matcher(t.getTextContent()).find() ) {
+					buf.append(name.toString()).append('=').append(t.getTextContent()).append('\n');
+				}
 			}
 		}
 	}
@@ -317,17 +393,71 @@ public class HMACHandler implements SOAPHandler<SOAPMessageContext> {
 		return Collections.singleton(SN_WS_AUTH);
 	}
 
+	/**
+	 * Set the shared secret value.
+	 * 
+	 * This value must be shared with the OCPP central system.
+	 * 
+	 * @param secret
+	 *        The secret value to use. If <em>null</em>, an empty string will be
+	 *        used.
+	 */
 	public void setSecret(String secret) {
+		if ( secret == null ) {
+			secret = "";
+		}
 		this.secret = secret;
 		hmac = null;
 	}
 
+	/**
+	 * Set the maximum allowed time skew, in milliseconds.
+	 * 
+	 * The {@code ts} attribute of incoming messages will be compared to the
+	 * current system time, and if it differs by more than this amount the
+	 * message will be rejected. In order for this check to be effective, the
+	 * system's clock must be kept accurate, for example by using a service like
+	 * NTP or GPS to synchronize the system's clock.
+	 * 
+	 * @param maximumTimeSkew
+	 *        The maximum time skew allowed.
+	 */
 	public void setMaximumTimeSkew(long maximumTimeSkew) {
 		this.maximumTimeSkew = maximumTimeSkew;
 	}
 
+	/**
+	 * Get the maximum allowed time skew.
+	 * 
+	 * @return The configured maximum time skew, in milliseconds.
+	 */
 	public long getMaximumTimeSkew() {
 		return maximumTimeSkew;
+	}
+
+	/**
+	 * Get the required flag.
+	 * 
+	 * @return The configured required flag value. Defaults to <em>true</em>.
+	 */
+	public boolean isRequired() {
+		return required;
+	}
+
+	/**
+	 * Set the required flag.
+	 * 
+	 * If <em>true</em> then an authentication header is required to be present
+	 * (and valid) or else an exception will be throw. If <em>false</em> then a
+	 * missing authentication header will not cause any exception to be thrown,
+	 * but if provided will still be validated and if not valid an exception
+	 * will still be thrown.
+	 * 
+	 * @param required
+	 *        The required flag value to set.
+	 */
+	public void setRequired(boolean required) {
+		this.required = required;
 	}
 
 }
